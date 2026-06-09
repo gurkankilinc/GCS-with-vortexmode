@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Araç/IDE
+.vscode/
+.idea/
+.DS_Store
+
+# MAVLink / uçuş kayıtları
+*.tlog
+*.tlog.raw
+*.parm
+*.bin
+*.log
