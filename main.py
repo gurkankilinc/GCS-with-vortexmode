@@ -1,14 +1,14 @@
 """
-Faz 11 - PFD dokunuslari (siyah-sari).
+Faz 12 - EFIS seritleri + harita derinligi + mod buton ikonlari (siyah-sari).
 
 Eklenenler:
-  - Yapay ufuk: yatis acisi yayi (bank arc) + pitch merdiveni rakamlari + gok/yer degrade
-  - Yumusak/sonumlu gosterge hareketi (roll/pitch ve irtifa hedefe suzulur, ziplama yok)
-  - Uyari bandi (annunciator): baglanti kaybi / GPS yok / zayif GPS / dusuk-kritik batarya
-  - Uygulama ikonu
+  - PFD: yapay ufkun solunda kayan HIZ seridi, saginda kayan IRTIFA seridi
+    (degerler serit uzerinde akar, ortadaki kutuda anlik deger; sonumlu hareket)
+  - Harita: eskidikce solan iz, ucak golgesi, "Home: X m" uzaklik etiketi
+  - Mod butonlari: ikonlar + MANUAL icin uyari rengi
 
 Calistirma (Terminal 2, .venv aktif, SITL Terminal 1'de acik):
-    python faz11_pfd.py
+    python faz12_efis.py
 """
 
 import sys
@@ -59,6 +59,8 @@ QPushButton {
 QPushButton:hover    { border-color: #FFC400; color: #FFC400; }
 QPushButton:pressed  { background-color: #23262d; }
 QPushButton:disabled { color: #4a4d55; border-color: #20232a; }
+QPushButton[dikkat="true"] { border-color: #5a4517; color: #d9a648; }
+QPushButton[dikkat="true"]:hover { border-color: #ff9f1a; color: #ffb74d; }
 QPushButton[aktif="true"] { background-color: #FFC400; color: #0e0f12; border-color: #FFC400; }
 QPushButton#baglan { background-color: #FFC400; color: #0e0f12; border: none; padding: 8px 20px; }
 QPushButton#baglan:hover { background-color: #ffd23d; }
@@ -166,46 +168,116 @@ class TelemetriThread(QThread):
         self._calisiyor = False
 
 
-class YapayUfuk(QWidget):
+class PFD(QWidget):
+    """Yapay ufuk + sol HIZ seridi + sag IRTIFA seridi. Sonumlu hareket."""
+    SERIT_SOL = 52   # hiz seridi genisligi
+    SERIT_SAG = 58   # irtifa seridi genisligi
+
     def __init__(self):
         super().__init__()
-        self.h_roll = 0.0
-        self.h_pitch = 0.0
-        self.d_roll = 0.0
-        self.d_pitch = 0.0
-        self.setMinimumSize(230, 250)
+        self.setMinimumSize(380, 260)
+        # hedef ve goruntulenen (sonumlu) degerler
+        self.h = {"roll": 0.0, "pitch": 0.0, "spd": 0.0, "alt": 0.0}
+        self.d = {"roll": 0.0, "pitch": 0.0, "spd": 0.0, "alt": 0.0}
 
-    def hedefle(self, roll_deg, pitch_deg):
-        self.h_roll = roll_deg
-        self.h_pitch = pitch_deg
+    def hedefle(self, roll, pitch, spd, alt):
+        self.h.update(roll=roll, pitch=pitch, spd=spd, alt=alt)
 
     def adim(self):
-        """Goruntulenen degeri hedefe yumusakca yaklastir (sonumleme)."""
-        k = 0.18
-        nr = self.d_roll + (self.h_roll - self.d_roll) * k
-        npi = self.d_pitch + (self.h_pitch - self.d_pitch) * k
-        if abs(nr - self.d_roll) > 0.02 or abs(npi - self.d_pitch) > 0.02:
-            self.d_roll, self.d_pitch = nr, npi
+        degisti = False
+        for k, kat in (("roll", .18), ("pitch", .18), ("spd", .2), ("alt", .2)):
+            yeni = self.d[k] + (self.h[k] - self.d[k]) * kat
+            if abs(yeni - self.d[k]) > 0.02:
+                self.d[k] = yeni
+                degisti = True
+        if degisti:
             self.update()
+
+    # ---- yardimci: kayan serit ----
+    def _serit(self, p, rect, deger, ppu, adim_kucuk, adim_etiket,
+               etiket_sagda, birim):
+        p.save()
+        yol = QPainterPath()
+        yol.addRoundedRect(rect, 6, 6)
+        p.setClipPath(yol)
+        p.fillPath(yol, QColor("#101216"))
+
+        cy = rect.center().y()
+        yari = rect.height() / 2
+        kucuk_font = QFont("DejaVu Sans Mono", 8)
+        p.setFont(kucuk_font)
+
+        # gorunur deger araligi
+        v_min = deger - yari / ppu
+        v_max = deger + yari / ppu
+        t = math.floor(v_min / adim_kucuk) * adim_kucuk
+        while t <= v_max:
+            if t >= 0:
+                y = cy - (t - deger) * ppu
+                buyuk = (abs(t % adim_etiket) < 1e-6)
+                p.setPen(QPen(QColor("#5a5f6a" if buyuk else "#33373f"),
+                              2 if buyuk else 1))
+                if etiket_sagda:   # cizgiler solda, etiket sagda (irtifa)
+                    p.drawLine(int(rect.left() + 2), int(y),
+                               int(rect.left() + (12 if buyuk else 7)), int(y))
+                    if buyuk:
+                        p.setPen(QColor("#aab0bb"))
+                        p.drawText(QRectF(rect.left() + 14, y - 8,
+                                          rect.width() - 16, 16),
+                                   Qt.AlignmentFlag.AlignVCenter |
+                                   Qt.AlignmentFlag.AlignLeft, f"{int(t)}")
+                else:              # cizgiler sagda, etiket solda (hiz)
+                    p.drawLine(int(rect.right() - (12 if buyuk else 7)), int(y),
+                               int(rect.right() - 2), int(y))
+                    if buyuk:
+                        p.setPen(QColor("#aab0bb"))
+                        p.drawText(QRectF(rect.left() + 2, y - 8,
+                                          rect.width() - 16, 16),
+                                   Qt.AlignmentFlag.AlignVCenter |
+                                   Qt.AlignmentFlag.AlignRight, f"{int(t)}")
+            t += adim_kucuk
+        p.restore()
+
+        # cerceve + birim etiketi
+        p.setPen(QPen(QColor("#23262d"), 1))
+        p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        p.drawRoundedRect(rect, 6, 6)
+        p.setPen(QColor(SOLUK))
+        p.setFont(QFont("DejaVu Sans", 8, QFont.Weight.Bold))
+        p.drawText(QRectF(rect.left(), rect.top() - 16, rect.width(), 14),
+                   Qt.AlignmentFlag.AlignCenter, birim)
+
+        # anlik deger kutusu (ortada)
+        kutu = QRectF(rect.left() + 2, cy - 13, rect.width() - 4, 26)
+        p.setPen(QPen(QColor(AKSAN), 1.5))
+        p.setBrush(QColor("#0e0f12"))
+        p.drawRoundedRect(kutu, 4, 4)
+        p.setPen(QColor(AKSAN))
+        p.setFont(QFont("DejaVu Sans Mono", 11, QFont.Weight.Bold))
+        p.drawText(kutu, Qt.AlignmentFlag.AlignCenter, f"{deger:.0f}")
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
-        r = min(w, h) / 2 - 4
+
+        serit_h = h - 26
+        sol_rect = QRectF(2, 20, self.SERIT_SOL, serit_h)
+        sag_rect = QRectF(w - self.SERIT_SAG - 2, 20, self.SERIT_SAG, serit_h)
+
+        # --- ortadaki ufuk dairesi ---
+        ccx = (sol_rect.right() + sag_rect.left()) / 2
+        cy = h / 2
+        r = min(sag_rect.left() - sol_rect.right(), h) / 2 - 6
         px_der = 3.2
 
-        # daire icine kirp
         yol = QPainterPath()
-        yol.addEllipse(QPointF(cx, cy), r, r)
-        p.setClipPath(yol)
-
-        # --- donen dunya: gok/yer degrade + ufuk + pitch merdiveni ---
+        yol.addEllipse(QPointF(ccx, cy), r, r)
         p.save()
-        p.translate(cx, cy)
-        p.rotate(-self.d_roll)
-        p.translate(0, self.d_pitch * px_der)
+        p.setClipPath(yol)
+        p.translate(ccx, cy)
+        p.rotate(-self.d["roll"])
+        p.translate(0, self.d["pitch"] * px_der)
         b = r * 3
         gok = QLinearGradient(0, -b, 0, 0)
         gok.setColorAt(0.0, QColor("#3d4a5c"))
@@ -217,9 +289,7 @@ class YapayUfuk(QWidget):
         p.fillRect(QRectF(-b, 0, 2 * b, b), yer)
         p.setPen(QPen(QColor(AKSAN), 2))
         p.drawLine(int(-b), 0, int(b), 0)
-
-        kucuk = QFont("DejaVu Sans", 7)
-        p.setFont(kucuk)
+        p.setFont(QFont("DejaVu Sans", 7))
         for d in (-30, -20, -10, 10, 20, 30):
             yy = int(-d * px_der)
             p.setPen(QPen(QColor("#cfd3da"), 1))
@@ -228,22 +298,19 @@ class YapayUfuk(QWidget):
             p.drawText(-44, yy + 4, str(abs(d)))
         p.restore()
 
-        # --- yatis acisi yayi (bank arc), sabit + hareketli isaretci ---
-        p.setClipping(False)
+        # yatis acisi yayi
         p.save()
-        p.translate(cx, cy)
-        ticks = [(-60, 1), (-45, 0), (-30, 1), (-20, 0), (-10, 0),
-                 (0, 1), (10, 0), (20, 0), (30, 1), (45, 0), (60, 1)]
-        for ang, major in ticks:
+        p.translate(ccx, cy)
+        for ang, major in [(-60, 1), (-45, 0), (-30, 1), (-20, 0), (-10, 0),
+                           (0, 1), (10, 0), (20, 0), (30, 1), (45, 0), (60, 1)]:
             p.save()
             p.rotate(ang)
             ln = 9 if major else 5
             p.setPen(QPen(QColor(SOLUK), 2 if major else 1))
             p.drawLine(0, int(-r), 0, int(-r + ln))
             p.restore()
-        # mevcut yatisi gosteren isaretci
         p.save()
-        p.rotate(self.d_roll)
+        p.rotate(self.d["roll"])
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(AKSAN))
         p.drawPolygon(QPolygonF([
@@ -251,14 +318,20 @@ class YapayUfuk(QWidget):
         p.restore()
         p.restore()
 
-        # --- sabit ucak referansi (merkez) + cerceve ---
+        # sabit ucak referansi + cerceve
         p.setPen(QPen(QColor(AKSAN), 3))
-        p.drawLine(int(cx - 30), int(cy), int(cx - 10), int(cy))
-        p.drawLine(int(cx + 10), int(cy), int(cx + 30), int(cy))
-        p.drawLine(int(cx), int(cy - 2), int(cx), int(cy + 2))
+        p.drawLine(int(ccx - 30), int(cy), int(ccx - 10), int(cy))
+        p.drawLine(int(ccx + 10), int(cy), int(ccx + 30), int(cy))
+        p.drawLine(int(ccx), int(cy - 2), int(ccx), int(cy + 2))
         p.setPen(QPen(QColor("#3a3d44"), 2))
         p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.drawEllipse(QPointF(ccx, cy), r, r)
+
+        # --- seritler ---
+        self._serit(p, sol_rect, self.d["spd"], ppu=4.0,
+                    adim_kucuk=5, adim_etiket=10, etiket_sagda=False, birim="HIZ m/s")
+        self._serit(p, sag_rect, self.d["alt"], ppu=2.0,
+                    adim_kucuk=10, adim_etiket=20, etiket_sagda=True, birim="İRT m")
 
 
 class HaritaWidget(QWidget):
@@ -272,7 +345,7 @@ class HaritaWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(220, 250)
+        self.setMinimumSize(220, 260)
         self.home = None
         self.iz = []
         self.konum = None
@@ -296,8 +369,8 @@ class HaritaWidget(QWidget):
         self.heading = heading
         if not self.iz or (abs(dogu - self.iz[-1][0]) + abs(kuzey - self.iz[-1][1])) > 1.0:
             self.iz.append((dogu, kuzey))
-            if len(self.iz) > 3000:
-                self.iz = self.iz[-3000:]
+            if len(self.iz) > 2000:
+                self.iz = self.iz[-2000:]
         self.update()
 
     def paintEvent(self, _):
@@ -339,31 +412,43 @@ class HaritaWidget(QWidget):
         p.setPen(QColor(SOLUK))
         p.drawText(int(cx - 4), int(cy - r_px - 6), "K")
 
-        if len(self.iz) >= 2:
-            yol = QPainterPath()
-            yol.moveTo(ekran(*self.iz[0]))
-            for e, n in self.iz[1:]:
-                yol.lineTo(ekran(e, n))
-            p.setPen(QPen(QColor(AKSAN), 2))
-            p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-            p.drawPath(yol)
+        # solan iz: eski kisim seffaf, yeni kisim parlak
+        n_iz = len(self.iz)
+        if n_iz >= 2:
+            for i in range(1, n_iz):
+                alfa = int(35 + 220 * (i / n_iz))
+                p.setPen(QPen(QColor(255, 196, 0, alfa), 2))
+                p.drawLine(ekran(*self.iz[i - 1]), ekran(*self.iz[i]))
 
+        # home isareti
         hp = ekran(0, 0)
         p.setPen(QPen(QColor(SOLUK), 1))
         p.drawLine(int(hp.x() - 5), int(hp.y()), int(hp.x() + 5), int(hp.y()))
         p.drawLine(int(hp.x()), int(hp.y() - 5), int(hp.x()), int(hp.y() + 5))
 
+        # ucak: once golge, sonra govde
         up = ekran(*self.konum)
-        p.save()
-        p.translate(up)
-        p.rotate(self.heading)
-        p.setPen(QPen(QColor("#0e0f12"), 1))
-        p.setBrush(QColor(AKSAN))
-        p.drawPolygon(self.UCAK)
-        p.restore()
+        for golge, renk in ((True, QColor(0, 0, 0, 130)), (False, QColor(AKSAN))):
+            p.save()
+            p.translate(up.x() + (2 if golge else 0), up.y() + (3 if golge else 0))
+            p.rotate(self.heading)
+            p.setPen(Qt.PenStyle.NoPen if golge else QPen(QColor("#0e0f12"), 1))
+            p.setBrush(renk)
+            p.drawPolygon(self.UCAK)
+            p.restore()
+
+        # home'a uzaklik etiketi
+        uzaklik = math.hypot(*self.konum)
+        p.setPen(QColor("#aab0bb"))
+        p.setFont(QFont("DejaVu Sans Mono", 9, QFont.Weight.Bold))
+        p.drawText(QRectF(0, h - 20, w, 16),
+                   Qt.AlignmentFlag.AlignCenter, f"Home: {uzaklik:.0f} m")
 
 
 class AnaPencere(QWidget):
+    MODLAR = [("GUIDED", "◎"), ("CIRCLE", "↻"), ("RTL", "⌂"),
+              ("MANUAL", "⚠"), ("VORTEX", "◉")]
+
     def __init__(self):
         super().__init__()
         self.arac = AracBaglantisi()
@@ -372,16 +457,14 @@ class AnaPencere(QWidget):
         self.aktif_mod = None
         self.son_d = None
         self.link_kayip = False
-        self.hedef_irtifa = 0.0
-        self.disp_irtifa = 0.0
         self.setWindowTitle("Celebi - Yer Istasyonu")
-        self.setMinimumSize(1080, 620)
+        self.setMinimumSize(1120, 620)
         self._arayuzu_kur()
         self.kontrol = QTimer(self)
         self.kontrol.setInterval(500)
         self.kontrol.timeout.connect(self.baglanti_kontrol)
         self.animasyon = QTimer(self)
-        self.animasyon.setInterval(33)  # ~30 fps yumusatma
+        self.animasyon.setInterval(33)
         self.animasyon.timeout.connect(self._animate)
 
     def _arayuzu_kur(self):
@@ -389,7 +472,6 @@ class AnaPencere(QWidget):
         ana.setContentsMargins(16, 14, 16, 14)
         ana.setSpacing(10)
 
-        # baslik
         baslik = QHBoxLayout()
         m1 = QLabel("ÇELEBİ"); m1.setObjectName("markaVurgu")
         m2 = QLabel("YER İSTASYONU"); m2.setObjectName("marka")
@@ -403,13 +485,11 @@ class AnaPencere(QWidget):
         baslik.addWidget(self.btn_baglan)
         ana.addLayout(baslik)
 
-        # uyari bandi (annunciator)
         self.uyari = QLabel("")
         self.uyari.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.uyari.setVisible(False)
         ana.addWidget(self.uyari)
 
-        # ust: gostergeler
         ust = QHBoxLayout(); ust.setSpacing(12)
 
         kutu_panel = QGroupBox("TELEMETRİ")
@@ -432,33 +512,27 @@ class AnaPencere(QWidget):
         izgara.setColumnStretch(0, 1)
         ust.addWidget(kutu_panel, 0)
 
-        kutu_ufuk = QGroupBox("YAPAY UFUK")
-        yu = QVBoxLayout(kutu_ufuk); yu.setContentsMargins(14, 10, 14, 14)
-        self.ufuk = YapayUfuk(); yu.addWidget(self.ufuk)
-        ust.addWidget(kutu_ufuk, 4)
+        kutu_pfd = QGroupBox("PFD")
+        yu = QVBoxLayout(kutu_pfd); yu.setContentsMargins(14, 10, 14, 14)
+        self.pfd = PFD(); yu.addWidget(self.pfd)
+        ust.addWidget(kutu_pfd, 6)
 
         kutu_harita = QGroupBox("HARİTA (İZ)")
         yh = QVBoxLayout(kutu_harita); yh.setContentsMargins(14, 10, 14, 14)
         self.harita = HaritaWidget(); yh.addWidget(self.harita)
         ust.addWidget(kutu_harita, 5)
 
-        kutu_irtifa = QGroupBox("İRTİFA")
-        yi = QVBoxLayout(kutu_irtifa); yi.setContentsMargins(14, 10, 14, 14)
-        self.irtifa_bar = QProgressBar()
-        self.irtifa_bar.setOrientation(Qt.Orientation.Vertical)
-        self.irtifa_bar.setRange(0, 120); self.irtifa_bar.setValue(0)
-        self.irtifa_bar.setFormat("%v m")
-        yi.addWidget(self.irtifa_bar, alignment=Qt.AlignmentFlag.AlignHCenter)
-        ust.addWidget(kutu_irtifa, 1)
-
         ana.addLayout(ust, 1)
 
-        # alt: modlar
         kutu_mod = QGroupBox("UÇUŞ MODLARI")
         mlay = QHBoxLayout(kutu_mod); mlay.setContentsMargins(14, 10, 14, 14); mlay.setSpacing(10)
         self.mod_butonlari = []
-        for mod in ["GUIDED", "CIRCLE", "RTL", "MANUAL", "VORTEX"]:
-            b = QPushButton(mod); b.setEnabled(False)
+        for mod, ikon in self.MODLAR:
+            b = QPushButton(f"{ikon}  {mod}")
+            b.setEnabled(False)
+            b.setProperty("mod_adi", mod)
+            if mod == "MANUAL":
+                b.setProperty("dikkat", "true")
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.clicked.connect(lambda _, mm=mod: self.moda_gec(mm))
             mlay.addWidget(b); self.mod_butonlari.append(b)
@@ -483,7 +557,7 @@ class AnaPencere(QWidget):
             return
         self.aktif_mod = mod
         for b in self.mod_butonlari:
-            b.setProperty("aktif", "true" if b.text() == mod else "false")
+            b.setProperty("aktif", "true" if b.property("mod_adi") == mod else "false")
             b.style().unpolish(b); b.style().polish(b)
 
     def _uyari_guncelle(self):
@@ -520,11 +594,7 @@ class AnaPencere(QWidget):
             self.uyari.setVisible(False)
 
     def _animate(self):
-        self.ufuk.adim()
-        fark = self.hedef_irtifa - self.disp_irtifa
-        if abs(fark) > 0.05:
-            self.disp_irtifa += fark * 0.2
-            self.irtifa_bar.setValue(max(0, min(120, int(self.disp_irtifa))))
+        self.pfd.adim()
 
     def baglanti_degistir(self):
         if self.arac.bagli_mi():
@@ -613,11 +683,8 @@ class AnaPencere(QWidget):
         else:
             self._renk(self.degerler["batarya"], METIN)
 
-        # hedefleri ayarla; gosterim _animate icinde yumusakca ilerler
-        self.hedef_irtifa = d["irtifa"]
-        self.ufuk.hedefle(d["roll"], d["pitch"])
+        self.pfd.hedefle(d["roll"], d["pitch"], d["hava_hizi"], d["irtifa"])
         self.harita.guncelle(d["lat"], d["lon"], d["heading"])
-
         self._uyari_guncelle()
 
     def closeEvent(self, event):
